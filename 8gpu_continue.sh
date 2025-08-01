@@ -18,7 +18,7 @@ torchrun \
     --nproc_per_node=8 \
     train.py \
     --model qwen \
-    --hf-model Qwen/Qwen3-0.6B \ 
+    --hf_model Qwen/Qwen3-0.6B \
     --optimizer adamw \
     --lr 5e-5 \
     --wd 0.01 \
