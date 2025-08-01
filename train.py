@@ -44,7 +44,7 @@ os.makedirs(PT_DIR, exist_ok=True)
 # FlashAttention優先 (cuDNN mathベースSDPAを無効化)
 torch.backends.cuda.enable_flash_sdp(True)
 torch.backends.cuda.enable_mem_efficient_sdp(True)
-torch.backends.cuda.enable_math_sdp(True)
+torch.backends.cuda.enable_math_sdp(False)
 
 # TF32関連
 torch.backends.cudnn.benchmark = True
@@ -53,45 +53,28 @@ torch.backends.cudnn.allow_tf32 = True
 from torch.nn.utils.rnn import pad_sequence
 
 def custom_collate(batch):
-    """改善されたcollate関数 - 最小限の修正"""
-    # 1. 有効なサンプルのみフィルタリング
-    valid_batch = []
-    for sample in batch:
-        if "input_ids" in sample and len(sample["input_ids"]) > 0:
-            # 512トークンまでtruncate
-            truncated_ids = sample["input_ids"][:512]
-            if len(truncated_ids) > 0:  # 再度チェック
-                valid_batch.append({
-                    "input_ids": torch.LongTensor(truncated_ids)
-                })
+    # 有効なサンプルのみを抽出（input_ids長が0のものを除外）
+    batch = [sample for sample in batch if "input_ids" in sample and len(sample["input_ids"]) > 0]
     
-    # 2. 有効なバッチが空の場合はNoneを返す
-    if len(valid_batch) == 0:
-        return None
-    
-    # 3. パディング処理
-    input_ids = [sample["input_ids"] for sample in valid_batch]
+    if len(batch) == 0:
+        return None  # 完全に空のバッチはスキップ
+
+    input_ids = [sample["input_ids"][:512] for sample in batch]
     input_ids_padded = pad_sequence(input_ids, batch_first=True, padding_value=0)
-    
-    # 4. attention_maskの作成と検証
     attention_mask = (input_ids_padded != 0).long()
-    
-    # 5. 各シーケンスが少なくとも1つの有効トークンを持つことを確認
-    seq_lengths = attention_mask.sum(dim=1)
-    if seq_lengths.min() == 0:
-        # 空のシーケンスを除外
-        valid_indices = seq_lengths > 0
-        input_ids_padded = input_ids_padded[valid_indices]
-        attention_mask = attention_mask[valid_indices]
-        
-        # それでも空になった場合
-        if input_ids_padded.size(0) == 0:
-            return None
-    
+
+    # 長さ0のattention_maskがある場合、除外
+    valid_indices = [i for i in range(len(attention_mask)) if attention_mask[i].sum() > 0]
+    if len(valid_indices) == 0:
+        return None
+
+    input_ids_padded = input_ids_padded[valid_indices]
+    attention_mask = attention_mask[valid_indices]
+
     return {
         "input_ids": input_ids_padded,
         "attention_mask": attention_mask,
-        "labels": input_ids_padded.clone(),
+        "labels": input_ids_padded.clone()
     }
 
 def main():
@@ -102,7 +85,7 @@ def main():
     parser.add_argument("--wd", type=float, default=0.1)
     parser.add_argument("--epoch", type=int, default=1)
     parser.add_argument("--batch_size", type=int, default=16)
-    parser.add_argument("--size", type=str, default="1B", choices=["0.5B", "1B", "3B", "7B"])
+    parser.add_argument("--size", type=str, default="1B", choices=["0.6B", "1B", "3B", "7B"])
     parser.add_argument("--save", type=int, default=5000)
     parser.add_argument("--dataset_dir", type=str, default=TOKENIZED_DATA_DIR)
     parser.add_argument("--resume", action="store_true", help="Resume training from last checkpoint")
@@ -250,47 +233,23 @@ def main():
     for epoch in range(args.epoch):
         train_sampler.set_epoch(epoch)  # epochごとにShuffleシードを切り替え
         steps_per_rank = len(train_loader)
-
+        step_start_time = time.time()
         for step, batch in enumerate(train_loader):
-            step_start_time = time.time()
             if batch is None:
                 print(f"[Rank:{local_rank}] Skipping empty batch at step {step}")
                 continue
 
             batch = {k: v.to(device) for k, v in batch.items()}
 
-            # バッチサイズとシーケンス長の確認
-            if batch["input_ids"].size(0) == 0 or batch["input_ids"].size(1) == 0:
-                print(f"[Rank:{local_rank}] Empty batch dimensions at step {step}")
+            # 念のため attention_mask が all-zero の場合も回避
+            if batch["attention_mask"].sum(dim=1).eq(0).all():
+                print(f"[Rank:{local_rank}] Entire batch is empty. Skipping step {step}")
                 continue
-
-            # attention_maskが全てゼロでないことを確認
-            if batch["attention_mask"].sum() == 0:
-                print(f"[Rank:{local_rank}] All-zero attention mask at step {step}")
-                continue
-            
-            # 各シーケンスに少なくとも1つの有効トークンがあることを確認
-            seq_lengths = batch["attention_mask"].sum(dim=1)
-            if (seq_lengths == 0).any():
-                print(f"[Rank:{local_rank}] Found empty sequences, filtering...")
-                valid_mask = seq_lengths > 0
-                batch = {k: v[valid_mask] for k, v in batch.items()}
+        
+            outputs = model(**batch, use_flash_attn=False)
+            loss = outputs.loss
                 
-                # フィルタリング後も空でないことを確認
-                if batch["input_ids"].size(0) == 0:
-                    print(f"[Rank:{local_rank}] Batch became empty after filtering")
-                    continue
-            
-            try:
-                outputs = model(**batch)  # use_flash_attn=False を削除（デフォルト値を使用）
-                loss = outputs.loss
-            except RuntimeError as e:
-                print(f"[Rank:{local_rank}] Error at step {step}: {str(e)}")
-                print(f"[Rank:{local_rank}] Batch shapes - input_ids: {batch['input_ids'].shape}, attention_mask: {batch['attention_mask'].shape}")
-                print(f"[Rank:{local_rank}] Attention mask sum: {batch['attention_mask'].sum()}")
-                continue
-                
-            loss.backward()
+            loss.backward()  # scalerなしで直接backward
             optimizer.step()
             lr_scheduler.step()
             
@@ -305,7 +264,7 @@ def main():
                 current_step = epoch * len(train_loader) + step + 1
                 remaining_time = (elapsed / current_step) * (total_steps - current_step)
 
-                log_entry = f"{epoch+1},{step},{current_step},{loss.item():.6f},{optimizer.param_groups[0]['lr']:.6f},{step_duration:.4f},{elapsed:.2f}"
+                log_entry = f"{epoch+1},{step},{current_step},{loss.item():.6f},{optimizer.param_groups[0]['lr']:.6f},{step_duration:.4f},{elapsed:.2f}\n"
                 with open(logfile_path, 'a') as f:
                     f.write(log_entry + "\n")
 
@@ -330,4 +289,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

@@ -3,41 +3,36 @@ from transformers import Qwen2Config
 from transformers import Qwen3Config
 
 class BaseModel:
-
     @staticmethod
     def get_qwen3_config(size: str) -> Qwen3Config:
-        if size == "0.5B":
-            return Qwen3Config(
-                hidden_size=1024,
-                intermediate_size=4096,
-                num_attention_heads=16,
-                num_hidden_layers=24,
-                vocab_size=151936,
-                bos_token_id=151643,
-                eos_token_id=151643,
-                rope_theta=10000.0,
-                tie_word_embeddings=True,
-                torch_dtype="bfloat16",
-                rms_norm_eps=1e-6,
-                use_cache=True,
-            )
-        elif size == "0.6B":
-            return Qwen3Config(
-                hidden_size=1024,
-                intermediate_size=4864,
-                num_attention_heads=16,
-                num_hidden_layers=24,
-                vocab_size=151936,
-                bos_token_id=151643,
-                eos_token_id=151643,
-                rope_theta=10000.0,
-                tie_word_embeddings=True,
-                torch_dtype="bfloat16",
-                rms_norm_eps=1e-6,
-                use_cache=True,
-            )
-        else:
-            raise ValueError(f"Unsupported Qwen3 size: {size}")
+        # 公称パラメータ（例）
+        PRESET = {
+            "0.6B": dict(hidden_size=1536, num_hidden_layers=28,
+                         num_attention_heads=16, num_key_value_heads=8),
+            "1B":   dict(hidden_size=2048, num_hidden_layers=24,
+                         num_attention_heads=16, num_key_value_heads=16),
+            "3B":   dict(hidden_size=2560, num_hidden_layers=32,
+                         num_attention_heads=20, num_key_value_heads=10),
+            "7B":   dict(hidden_size=4096, num_hidden_layers=32,
+                         num_attention_heads=32, num_key_value_heads=8),
+        }
+
+        if size not in PRESET:
+             raise ValueError(f"Unsupported size: {size}")
+
+        cfg_kwargs = PRESET[size].copy()
+        cfg_kwargs.update(
+            intermediate_size=cfg_kwargs["hidden_size"] * 4,
+            rope_theta=1000000,
+            use_sliding_window=False,
+        )
+        config = Qwen3Config(**cfg_kwargs)
+
+        # セーフティネット
+        if getattr(config, "num_key_value_heads", 0) in (0, None):
+            config.num_key_value_heads = config.num_attention_heads
+
+        return config
 
     @staticmethod
     def get_qwen2_config(size):

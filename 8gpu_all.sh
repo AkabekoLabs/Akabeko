@@ -15,12 +15,12 @@ export NCCL_NVLS_ENABLE=0
 export NCCL_SHARP_DISABLE=1
 
 torchrun \
-    --nproc_per_node=8 \
     train.py \
+    --nproc_per_node=8 \
     --model qwen \
     --optimizer adamw \
     --lr 1e-3 \
     --wd 0.1 \
-    --size 0.5B \
-    --batch_size 16  # GPUメモリ不足解消のために小さめのバッチサイズを指定
+    --size 0.6B \
+    --batch_size 16
 

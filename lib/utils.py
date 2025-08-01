@@ -24,41 +24,53 @@ def human_readable(num: int, suffix: str = "B") -> str:
     return f"{num:.1f}P{suffix}"
 
 # ---------- チェックポイント ---------- #
-def save_checkpoint(model, optimizer, epoch: int, step: int,
-                    checkpoint_dir: str, filename: str = "checkpoint.pth") -> None:
+# ---------- チェックポイント ---------- #
+def save_checkpoint(
+    model,
+    optimizer,
+    epoch: int,
+    step: int,
+    checkpoint_dir: str,
+    filename: str = "checkpoint.pth",
+) -> None:                                 # ← 閉じカッコと戻り値
     is_final = filename == "final_checkpoint.pth"
 
     if is_final:
         # 👇 final は stepディレクトリなしでそのまま保存
         os.makedirs(checkpoint_dir, exist_ok=True)
         checkpoint_path = os.path.join(checkpoint_dir, filename)
-        metadata_path = os.path.join(checkpoint_dir, "checkpoint_metadata.json")
+        metadata_path  = os.path.join(checkpoint_dir, "checkpoint_metadata.json")
     else:
         # 👇 通常は step_000000 ディレクトリ作成
-        step_dir = os.path.join(checkpoint_dir, f"step_{step:06d}")
+        step_dir       = os.path.join(checkpoint_dir, f"step_{step:06d}")
         os.makedirs(step_dir, exist_ok=True)
         checkpoint_path = os.path.join(step_dir, filename)
-        metadata_path = os.path.join(step_dir, "checkpoint_metadata.json")
+        metadata_path   = os.path.join(step_dir, "checkpoint_metadata.json")
 
     model_to_save = model.module if isinstance(model, DDP) else model
 
+    # ---- 重みとオプティマイザ ----
     torch.save(
         {
             "epoch": epoch,
-            "step": step,
-            "model_state_dict": model_to_save.state_dict(),
+            "step":  step,
+            "model_state_dict":     model_to_save.state_dict(),
             "optimizer_state_dict": optimizer.state_dict(),
         },
         checkpoint_path,
     )
 
-    metadata = {"last_epoch": epoch, "last_step": step}
+    # ---- メタ情報 ----
     with open(metadata_path, "w") as f:
-        json.dump(metadata, f)
+        json.dump({"last_epoch": epoch, "last_step": step}, f)
 
-    # latest_checkpoint.txt を常に更新（オプション）
-    latest_link = os.path.join(checkpoint_dir, "latest_checkpoint.txt")
-    with open(latest_link, "w") as f:
+    # ---- config.json を同期保存 ----
+    cfg_path = os.path.join(os.path.dirname(checkpoint_path), "config.json")
+    with open(cfg_path, "w", encoding="utf-8") as f:
+        json.dump(model_to_save.config.to_dict(), f, indent=2, ensure_ascii=False)
+
+    # ---- latest_checkpoint.txt を更新 ----
+    with open(os.path.join(checkpoint_dir, "latest_checkpoint.txt"), "w") as f:
         f.write(checkpoint_path + "\n")
 
 # ---------- データセット ---------- #
