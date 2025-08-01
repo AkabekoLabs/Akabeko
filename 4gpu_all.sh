@@ -13,10 +13,13 @@ export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
 export CUBLAS_WORKSPACE_CONFIG=:16:8
 export NCCL_P2P_DISABLE=1
 export NCCL_IB_DISABLE=1
-
+export NCCL_NET=Socket
+# HPC系プラグインを無効化
+export NCCL_NVLS_ENABLE=0
+export NCCL_SHARP_DISABLE=1
 torchrun \
-    train.py \
     --nproc_per_node=4 \
+    train.py \
     --model qwen \
     --optimizer adamw \
     --lr 1e-3 \

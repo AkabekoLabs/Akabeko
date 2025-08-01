@@ -12,8 +12,8 @@ export NCCL_P2P_DISABLE=0
 export CUBLAS_WORKSPACE_CONFIG=:16:8
 
 torchrun \
-    train.py \
     --nproc_per_node=2 \
+    train.py \
     --model qwen \
     --optimizer adamw \
     --lr 1e-3 \

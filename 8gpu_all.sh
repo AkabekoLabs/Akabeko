@@ -15,8 +15,8 @@ export NCCL_NVLS_ENABLE=0
 export NCCL_SHARP_DISABLE=1
 
 torchrun \
-    train.py \
     --nproc_per_node=8 \
+    train.py \
     --model qwen \
     --optimizer adamw \
     --lr 1e-3 \
