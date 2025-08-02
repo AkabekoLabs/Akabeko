@@ -39,10 +39,8 @@ CONFIG_PATH = CKPT_DIR / "config.json"  # optional
 # ---------------------------------------------------------------------------
 SIZE_LOOKUP = {
     1024: "0.6B",
-    1536: "0.6B", 
-    2048: "1B",
-    2560: "3B",
-    4096: "7B",
+    2048: "1.7B",
+    2560: "4B",
 }
 
 def infer_size_from_state_dict(sd: dict) -> str:
