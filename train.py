@@ -85,7 +85,7 @@ def main():
     parser.add_argument("--wd", type=float, default=0.1)
     parser.add_argument("--epoch", type=int, default=1)
     parser.add_argument("--batch_size", type=int, default=16)
-    parser.add_argument("--size", type=str, default="1B", choices=["0.6B", "1B", "3B", "7B"])
+    parser.add_argument("--size", type=str, default="1B", choices=["0.6B", "1.7B", "4B"])
     parser.add_argument("--save", type=int, default=5000)
     parser.add_argument("--dataset_dir", type=str, default=TOKENIZED_DATA_DIR)
     parser.add_argument("--resume", action="store_true", help="Resume training from last checkpoint")

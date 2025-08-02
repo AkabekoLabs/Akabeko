@@ -1,20 +1,17 @@
-# base_model.py
 from transformers import Qwen2Config
 from transformers import Qwen3Config
 
 class BaseModel:
     @staticmethod
     def get_qwen3_config(size: str) -> Qwen3Config:
-        # 公称パラメータ（例）
+        # 公称パラメータ（修正済み）
         PRESET = {
-            "0.6B": dict(hidden_size=1536, num_hidden_layers=28,
-                         num_attention_heads=16, num_key_value_heads=8),
-            "1B":   dict(hidden_size=2048, num_hidden_layers=24,
-                         num_attention_heads=16, num_key_value_heads=16),
-            "3B":   dict(hidden_size=2560, num_hidden_layers=32,
-                         num_attention_heads=20, num_key_value_heads=10),
-            "7B":   dict(hidden_size=4096, num_hidden_layers=32,
-                         num_attention_heads=32, num_key_value_heads=8),
+            "0.6B": dict(hidden_size=1024, num_hidden_layers=28,
+                         num_attention_heads=16, num_key_value_heads=8, intermediate_size=3072),
+            "1.7B": dict(hidden_size=2048, num_hidden_layers=28,
+                         num_attention_heads=16, num_key_value_heads=8, intermediate_size=6144),
+            "4B":   dict(hidden_size=2560, num_hidden_layers=36,
+                         num_attention_heads=32, num_key_value_heads=8, intermediate_size=9728),
         }
 
         if size not in PRESET:
@@ -22,7 +19,6 @@ class BaseModel:
 
         cfg_kwargs = PRESET[size].copy()
         cfg_kwargs.update(
-            intermediate_size=cfg_kwargs["hidden_size"] * 4,
             rope_theta=1000000,
             use_sliding_window=False,
         )
