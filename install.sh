@@ -3,4 +3,4 @@ mkdir -p /workspace/logs
 apt-get update
 apt-get install -y python3-dev vim
 pip install accelerate
-
+pip install bitsandbytes
