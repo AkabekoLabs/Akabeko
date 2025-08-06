@@ -14,7 +14,7 @@ export CUBLAS_WORKSPACE_CONFIG=:16:8
 cd ../..
 torchrun \
     --nproc_per_node=2 \
-    train.py \
+    train_gpt.py \
     --hf_model openai/gpt-oss-20b \
     --optimizer adamw8bit \
     --lr 5e-5 \
