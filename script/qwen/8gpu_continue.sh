@@ -14,13 +14,14 @@ export CUBLAS_WORKSPACE_CONFIG=:16:8
 export NCCL_NVLS_ENABLE=0
 export NCCL_SHARP_DISABLE=1
 
+cd ../..
 torchrun \
     --nproc_per_node=8 \
     train.py \
     --model qwen \
+    --hf_model Qwen/Qwen3-0.6B \
     --optimizer adamw \
-    --lr 1e-3 \
-    --wd 0.1 \
-    --size 0.6B \
+    --lr 5e-5 \
+    --wd 0.01 \
     --batch_size 16
 

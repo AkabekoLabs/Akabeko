@@ -11,6 +11,7 @@ export NCCL_P2P_DISABLE=0
 # cuDNN SDPA実装を回避してFlashAttentionのみ使いたい場合
 export CUBLAS_WORKSPACE_CONFIG=:16:8
 
+cd ../..
 torchrun \
     --nproc_per_node=2 \
     train.py \

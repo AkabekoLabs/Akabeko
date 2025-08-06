@@ -17,6 +17,7 @@ export NCCL_IB_DISABLE=1
 export NCCL_NVLS_ENABLE=0
 export NCCL_SHARP_DISABLE=1
 
+cd ../..
 torchrun \
     --nproc_per_node=4 \
     train.py \

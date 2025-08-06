@@ -93,22 +93,15 @@ def get_traindata(pt_dir):
     else:
         return ConcatDataset(datasets)
 
+from bitsandbytes.optim import AdamW8bit
 
-# ---------- オプティマイザ ---------- #
-def get_optimizer(name: str, model, lr: float = 1e-3, wd: float = 0.1):
-    if name == "adamw":
-        return torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=wd, betas=(0.9, 0.95))
-
-    if name == "muon":
-        muon_params = [p for n, p in model.named_parameters()
-                       if p.ndim >= 2 and "embed_tokens" not in n and "lm_head" not in n]
-        
-        # 🔥 ここで Tensor の ID で比較
-        muon_param_ids = {id(p) for p in muon_params}
-        adamw_params = [p for n, p in model.named_parameters()
-                        if id(p) not in muon_param_ids]
-
-        return Muon(lr=lr, wd=wd, muon_params=muon_params, adamw_params=adamw_params)
-
-    raise ValueError(f"Unsupported optimizer: {name}")
-
+def get_optimizer(optimizer_name, model, lr=1e-3, wd=0.1):
+    if optimizer_name == "adamw8bit":
+        return AdamW8bit(model.parameters(), lr=lr, weight_decay=wd)
+    elif optimizer_name == "adamw":
+        return torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=wd)
+    elif optimizer_name == "muon":
+        from lib.muon import Muon
+        return Muon(model.parameters(), lr=lr, weight_decay=wd)
+    else:
+        raise ValueError(f"Unsupported optimizer: {optimizer_name}")

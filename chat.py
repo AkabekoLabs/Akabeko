@@ -1,12 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Interactive chat script for a finetuned Qwen‑2 model.
-
-* Automatically infers model size (0.5B / 1B / 3B / 7B) from:
-  1. `config.json` saved alongside the checkpoint; or
-  2. hidden_size extracted from the checkpoint weights.
-* Loads the correct `Qwen2Config` via `BaseModel.get_qwen2_config`.
-* Starts a simple REPL; type `[exit]` to quit.
-"""
+"""Interactive chat script for a finetuned Qwen3 / gpt-oss-20b model."""
 
 import os
 import sys
@@ -18,7 +11,7 @@ from pathlib import Path
 import torch
 from loguru import logger
 import transformers
-from transformers import Qwen3Config, Qwen3ForCausalLM, AutoTokenizer
+from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, Qwen3Config, Qwen3ForCausalLM
 
 from lib.base_model import BaseModel
 
@@ -41,12 +34,12 @@ SIZE_LOOKUP = {
     1024: "0.6B",
     2048: "1.7B",
     2560: "4B",
+    2880: "6.7B",  # 追加: OSS-20B hidden_size
     4096: "8B",
 }
 
 def infer_size_from_state_dict(sd: dict) -> str:
     """Detect hidden_size from any linear weight and map -> size label."""
-    # look for embed_tokens or first transformer block
     for key, w in sd.items():
         if w.ndim == 2:  # [vocab, hidden] or [hidden, hidden]
             hidden = w.shape[-1]
@@ -54,50 +47,43 @@ def infer_size_from_state_dict(sd: dict) -> str:
                 return SIZE_LOOKUP[hidden]
     raise RuntimeError("Could not infer model size from checkpoint.")
 
-
-@staticmethod
-def get_qwen3_config(size: str) -> Qwen3Config:
-    model_id = f"Qwen/Qwen3-{size}"
-    return Qwen3Config.from_pretrained(model_id, trust_remote_code=True)
-
-def load_model(checkpoint_path: Path, config_path: Path) -> tuple[Qwen3ForCausalLM, AutoTokenizer, str]:
+def load_model(checkpoint_path: Path, config_path: Path):
     ckpt = torch.load(checkpoint_path, map_location="cpu")
 
     if config_path.exists():
         logger.info(f"Loading config from {config_path}")
         model_config_dict = json.loads(config_path.read_text())
-        model_config = Qwen3Config.from_dict(model_config_dict)
-        hidden_size = model_config.hidden_size
+        model_type = model_config_dict.get("model_type", "")
+
+        if model_type == "gpt_oss":
+            # AutoConfig.from_dict は存在しないため、直接 AutoModelForCausalLM.from_pretrained を使う
+            model_id = model_config_dict.get("_name_or_path", "openai/gpt-oss-20b")
+            model = AutoModelForCausalLM.from_pretrained(model_id, trust_remote_code=True)
+            tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
+            model.load_state_dict(ckpt["model_state_dict"], strict=False)
+        elif model_type == "qwen3":
+            model_config = Qwen3Config.from_dict(model_config_dict)
+            model = Qwen3ForCausalLM(model_config)
+            tokenizer = AutoTokenizer.from_pretrained(model_config_dict.get("_name_or_path", "Qwen/Qwen3"), trust_remote_code=True)
+            model.load_state_dict(ckpt["model_state_dict"], strict=False)
+        else:
+            raise RuntimeError(f"Unknown model_type: {model_type}")
+
+        hidden_size = model.config.hidden_size
     else:
         logger.warning("config.json not found — inferring size from checkpoint weights …")
-        hidden_size = None
-        for w in ckpt["model_state_dict"].values():
-            if w.ndim == 2:
-                hidden_size = w.shape[-1]
-                break
-        if hidden_size not in SIZE_LOOKUP:
-            raise RuntimeError("Could not infer model size from checkpoint.")
-        size_label = SIZE_LOOKUP[hidden_size]
+        hidden_size = infer_size_from_state_dict(ckpt["model_state_dict"])
+        size_label = SIZE_LOOKUP.get(hidden_size, "unknown")
         model_config = BaseModel.get_qwen3_config(size_label)
+        model = Qwen3ForCausalLM(model_config)
+        tokenizer = AutoTokenizer.from_pretrained(f"Qwen/Qwen3-{size_label}", trust_remote_code=True)
+        model.load_state_dict(ckpt["model_state_dict"], strict=False)
         logger.info(f"Detected size = {size_label}")
 
-    # tokenizer の読み込み（config.jsonがある場合、そこから model_id 推測）
-    if config_path.exists() and "model_type" in model_config.to_dict():
-        model_type = model_config.to_dict()["model_type"]
-        # 仮に model_id を推定するなら名前で生成
-        size_label = SIZE_LOOKUP.get(model_config.hidden_size, "unknown")
-        model_id = f"Qwen/Qwen3-{size_label}"
-    else:
-        model_id = f"Qwen/Qwen3-{SIZE_LOOKUP.get(model_config.hidden_size, 'unknown')}"
-
-    tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
-
-    model = Qwen3ForCausalLM(model_config)
-    model.load_state_dict(ckpt["model_state_dict"], strict=False)
     model.config.pad_token_id = model.config.eos_token_id
     model.eval()
 
-    size_label = SIZE_LOOKUP.get(model_config.hidden_size, "unknown")
+    size_label = SIZE_LOOKUP.get(hidden_size, "unknown")
     return model, tokenizer, size_label
 
 # ---------------------------------------------------------------------------
