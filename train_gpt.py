@@ -103,7 +103,8 @@ def main():
     print(f"✅ Loaded {len(raw_data)} samples from {len(dataset_pt_files)} files")
     train_dataset = AkabekoDataset(raw_data, tokenizer)
     print(f"📊 Total dataset size: {len(train_dataset)} samples")  # ← この行を追加！
-    print(train_dataset[0])  # ← これで1サンプル中身見てみて
+    MAX_LEN = 1024  # Reduce max sequence length
+    train_dataset = [s for s in train_dataset if len(s["input_ids"]) <= MAX_LEN]
 
     # モデルロード (DDP無し・Accelerate使用)
     model = AutoModelForCausalLM.from_pretrained(
