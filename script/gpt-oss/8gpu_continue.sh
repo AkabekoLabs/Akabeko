@@ -13,13 +13,14 @@ export CUBLAS_WORKSPACE_CONFIG=:16:8
 # HPC系プラグインを無効化
 export NCCL_NVLS_ENABLE=0
 export NCCL_SHARP_DISABLE=1
-
+export NCCL_LAUNCH_MODE=blocking
 cd ../..
 torchrun \
     --nproc_per_node=8 \
     train_gpt.py \
     --hf_model openai/gpt-oss-20b \
     --optimizer adamw8bit \
+    --save 10 \
     --lr 5e-5 \
     --wd 0.01 \
     --batch_size 1

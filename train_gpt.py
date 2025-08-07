@@ -11,6 +11,7 @@ from lib.akabeko_dataset_gpt import AkabekoDataset
 from lib.utils import save_checkpoint, format_hms, get_optimizer
 from glob import glob
 import json
+import triton
 
 DATA_PATH = os.getcwd()
 PT_DIR = os.path.join(DATA_PATH, "tokenized_dataset")
@@ -110,8 +111,9 @@ def main():
     model = AutoModelForCausalLM.from_pretrained(
         args.hf_model,
         torch_dtype=torch.bfloat16,
-        device_map="auto"
+        device_map="auto",
     )
+    torch.cuda.empty_cache()
     model.gradient_checkpointing_enable() 
     model.train()
 
@@ -122,7 +124,7 @@ def main():
         batch_size=args.batch_size,
         sampler=sampler,
         num_workers=0, 
-        pin_memory=True,
+        pin_memory=False,
         persistent_workers=False,
         prefetch_factor=None,
         collate_fn=custom_collate,
@@ -145,7 +147,7 @@ def main():
     # トレーニング開始
     total_start_time = time.time()
     total_steps = len(train_loader) * args.epoch
-    accumulation_steps = 16  # batch_size=1 だけど accumulation_stepsで実質 0.5
+    accumulation_steps = 128
 
     for epoch in range(args.epoch):
         sampler.set_epoch(epoch)
@@ -168,6 +170,7 @@ def main():
                 continue
 
             if (step + 1) % accumulation_steps == 0:
+                torch.cuda.empty_cache()
                 optimizer.step()
                 lr_scheduler.step()
                 optimizer.zero_grad(set_to_none=True)
@@ -187,11 +190,11 @@ def main():
 
                 # 中間checkpoint保存
                 if step % args.save == 0 and step > 0 and local_rank == 0:
+                    torch.cuda.empty_cache()
                     os.makedirs(CHECKPOINT_DIR, exist_ok=True)
                     save_checkpoint(model, optimizer, epoch, step, checkpoint_dir=CHECKPOINT_DIR)
                     save_config(tokenizer, CHECKPOINT_DIR)  # ← config.json 保存
                     torch.cuda.empty_cache()
-
 
         if local_rank == 0:
             last_ckpt_dir = os.path.join(CHECKPOINT_DIR, "last")

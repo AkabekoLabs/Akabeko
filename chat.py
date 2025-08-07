@@ -34,7 +34,7 @@ SIZE_LOOKUP = {
     1024: "0.6B",
     2048: "1.7B",
     2560: "4B",
-    2880: "6.7B",  # 追加: OSS-20B hidden_size
+    2880: "20B",
     4096: "8B",
 }
 
@@ -113,7 +113,7 @@ def main():
                 print("👋 Bye!"); break
             inp = tokenizer(usr, return_tensors="pt").to(device)
             with torch.no_grad():
-                out = model.generate(**inp, max_length=100, temperature=0.7, top_k=50, top_p=0.9, do_sample=True)
+                out = model.generate(**inp, max_length=1024, temperature=0.7, top_k=50, top_p=0.9, do_sample=True)
             ans = tokenizer.decode(out[0], skip_special_tokens=True)
             print(f"🤖 Akabeko: {ans}\n")
         except KeyboardInterrupt:
