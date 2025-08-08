@@ -9,7 +9,7 @@ torchrun \
   --nproc_per_node=2 \
   train_gpt.py \
   --hf_model openai/gpt-oss-20b \
-  --optimizer adamw8bit \
+  --optimizer agedadamw8bit \
   --lr 5e-5 \
   --wd 0.01 \
   --batch_size 1 \

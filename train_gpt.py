@@ -80,7 +80,8 @@ def save_config(tokenizer, output_dir):
 def main():
     parser = argparse.ArgumentParser()
     # Optimizer は 8bit AdamW をデフォルト（オプティマイザ状態でのVRAMを削減）
-    parser.add_argument("--optimizer", type=str, default="adamw8bit", choices=["muon", "adamw", "adamw8bit"])
+    parser.add_argument("--optimizer", type=str, default="adamw8bit",
+                        choices=["muon", "adamw", "adamw8bit", "pagedadamw8bit"])
     parser.add_argument("--lr", type=float, default=2e-5)
     parser.add_argument("--wd", type=float, default=0.01)
     parser.add_argument("--epoch", type=int, default=1)
@@ -201,28 +202,36 @@ def main():
     )
 
     # ---------------------------
-    # Optimizer と Scheduler の用意
+    # Optimizer と Scheduler の用意（引数で選択可能）
     # ---------------------------
-    # get_optimizer は使わず bitsandbytes を直接指定（OOM対策で Paged を優先）
-    if hasattr(bnb.optim, "PagedAdamW8bit"):
+    if args.optimizer == "pagedadamw8bit":
+        if not hasattr(bnb.optim, "PagedAdamW8bit"):
+            raise RuntimeError("bitsandbytes の PagedAdamW8bit が見つかりません。bitsandbytes のバージョンを確認してください。")
         optimizer = bnb.optim.PagedAdamW8bit(
-            model.parameters(),
-            lr=args.lr,
-            weight_decay=args.wd,
-            betas=(0.9, 0.95),
+            model.parameters(), lr=args.lr, weight_decay=args.wd, betas=(0.9, 0.95)
         )
         if local_rank == 0:
-            print("Using bitsandbytes PagedAdamW8bit")
-    else:
+            print("Using bitsandbytes PagedAdamW8bit (by --optimizer)")
+    elif args.optimizer == "adamw8bit":
         optimizer = bnb.optim.AdamW8bit(
-            model.parameters(),
-            lr=args.lr,
-            weight_decay=args.wd,
-            betas=(0.9, 0.95),
+            model.parameters(), lr=args.lr, weight_decay=args.wd, betas=(0.9, 0.95)
         )
         if local_rank == 0:
-            print("Using bitsandbytes AdamW8bit")
-
+            print("Using bitsandbytes AdamW8bit (by --optimizer)")
+    elif args.optimizer == "adamw":
+        # 通常のTorch版AdamW
+        optimizer = torch.optim.AdamW(
+            model.parameters(), lr=args.lr, weight_decay=args.wd, betas=(0.9, 0.95)
+        )
+        if local_rank == 0:
+            print("Using torch.optim.AdamW (by --optimizer)")
+    elif args.optimizer == "muon":
+        # ユーザのutilsにある想定。なければ適宜置き換え。
+        optimizer = get_optimizer("muon", model.parameters(), args.lr, args.wd)
+        if local_rank == 0:
+            print("Using Muon optimizer via get_optimizer (by --optimizer)")
+    else:
+        raise ValueError(f"Unknown optimizer: {args.optimizer}")
 
     num_training_steps = max(1, len(train_loader) * args.epoch)
     # cosine with warmup。ウォームアップは全体の ~3% か 1000 ステップの小さい方
