@@ -614,7 +614,6 @@ def main():
                         if args.save_hf_on_fail:
                             fallback_dir = args.export_dir or os.path.join(DATA_PATH, "export_hf")
                             _export_hf(engine, tokenizer, fallback_dir, tag, max_shard_gb=args.export_max_shard_gb)
-                break
             # for step
 
         # for epoch
