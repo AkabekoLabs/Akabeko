@@ -10,7 +10,7 @@ torchrun \
   train_gpt.py \
   --hf_model openai/gpt-oss-20b \
   --optimizer agedadamw8bit \
-  --lr 5e-5 \
+  --lr 1e-5 \
   --wd 0.01 \
   --batch_size 1 \
   --save 1000
