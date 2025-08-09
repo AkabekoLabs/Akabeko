@@ -1,15 +1,15 @@
 #!/bin/bash
 export CUDA_VISIBLE_DEVICES=0,1
 export TOKENIZERS_PARALLELISM=false
-export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True,max_split_size_mb:256"
 export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
 export NCCL_DEBUG=WARN
-
+cd ../../
 torchrun \
   --nproc_per_node=2 \
   train_gpt.py \
   --hf_model openai/gpt-oss-20b \
-  --optimizer agedadamw8bit \
+  --optimizer pagedadamw8bit \
   --lr 1e-5 \
   --wd 0.01 \
   --batch_size 1 \
