@@ -23,7 +23,7 @@ from torch.distributed.fsdp import (
     ShardingStrategy, BackwardPrefetch, MixedPrecision
 )
 from torch.distributed.fsdp.api import StateDictType, FullStateDictConfig
-from torch.distributed.fsdp.wrap import size_based_auto_wrap_policy  # ★ 追加
+from torch.distributed.fsdp.wrap import size_based_auto_wrap_policy
 
 # =========================================================
 # sdpa_kernel 互換ラッパ（新旧APIどちらでも動く）
@@ -107,8 +107,19 @@ def save_config(tokenizer, output_dir):
 # FSDP対応の安全な保存（FULL_STATEをrank0に集約→CPU保存）
 # =========================================================
 def fsdp_safe_save(model: FSDP, optimizer, epoch, step, checkpoint_dir, filename="pytorch_model.pt"):
-    os.makedirs(checkpoint_dir, exist_ok=True)
-    is_rank0 = (dist.get_rank() == 0) if dist.is_initialized() else True
+    """
+    全rankで呼び出し必須。内部で FULL_STATE を rank0 に集約し rank0 のみ書き込み。
+    """
+    is_dist = dist.is_initialized()
+    rank = dist.get_rank() if is_dist else 0
+    is_rank0 = (rank == 0)
+
+    if is_rank0:
+        os.makedirs(checkpoint_dir, exist_ok=True)
+
+    # すべてのrankで足並みを揃える
+    if is_dist:
+        dist.barrier()
 
     state_cfg = FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
     with FSDP.state_dict_type(model, StateDictType.FULL_STATE_DICT, state_cfg):
@@ -126,6 +137,23 @@ def fsdp_safe_save(model: FSDP, optimizer, epoch, step, checkpoint_dir, filename
             save_path,
         )
         print(f"[Rank 0] Saved FSDP FULL_STATE to: {save_path}")
+
+    if is_dist:
+        dist.barrier()
+
+# 中間チェックポイント：元のフォルダ構成に近い形で ep_step サブフォルダへ保存
+def save_mid_checkpoint(model, optimizer, epoch, step, base_dir, tokenizer):
+    subdir = os.path.join(base_dir, f"ep{epoch+1}_step{step+1:06d}")
+    fsdp_safe_save(model, optimizer, epoch, step, checkpoint_dir=subdir, filename="pytorch_model.pt")
+    if (not dist.is_initialized()) or dist.get_rank() == 0:
+        save_config(tokenizer, subdir)
+
+# 最終チェックポイント：/last に保存
+def save_final_checkpoint(model, optimizer, epoch, step, base_dir, tokenizer):
+    last_dir = os.path.join(base_dir, "last")
+    fsdp_safe_save(model, optimizer, epoch, step, checkpoint_dir=last_dir, filename="final_checkpoint.pth")
+    if (not dist.is_initialized()) or dist.get_rank() == 0:
+        save_config(tokenizer, last_dir)
 
 # =========================================================
 # main
@@ -226,14 +254,13 @@ def main():
             buffer_dtype=torch.bfloat16,
         )
 
-        # ★ コア修正：層ごとに自動wrap（全モデル一括wrapはNG）
-        # 20B級なら 1e7〜1e8 の間で様子見。まず 5e7(=50M) で各ブロック単位に分割されやすい。
+        # 層ごとに自動wrap（全モデル一括wrapはNG）
         auto_wrap = partial(size_based_auto_wrap_policy, min_num_params=50_000_000)
 
         model = FSDP(
             model,
             sharding_strategy=ShardingStrategy.FULL_SHARD,
-            auto_wrap_policy=auto_wrap,              # ← これが重要
+            auto_wrap_policy=auto_wrap,
             mixed_precision=mp,
             use_orig_params=True,
             device_id=device,
@@ -384,17 +411,20 @@ def main():
                         except Exception as e:
                             print(f"[Rank {local_rank}] ログ書き込み失敗: {e}")
 
-                    # 中間チェックポイント（FSDP方式で保存）
-                    if local_rank == 0 and args.save > 0 and (step + 1) % args.save == 0:
-                        fsdp_safe_save(model, optimizer, epoch, step, checkpoint_dir=CHECKPOINT_DIR)
-                        save_config(tokenizer, CHECKPOINT_DIR)
+                    # ======= 中間チェックポイント（全rankで呼ぶ）======
+                    if args.save > 0 and (step + 1) % args.save == 0:
+                        torch.cuda.synchronize()
+                        dist.barrier()
+                        save_mid_checkpoint(model, optimizer, epoch, step, CHECKPOINT_DIR, tokenizer)
+                        dist.barrier()
+                        torch.cuda.empty_cache()
 
-            # エポック末尾の保存
-            if local_rank == 0:
-                last_ckpt_dir = os.path.join(CHECKPOINT_DIR, "last")
-                os.makedirs(last_ckpt_dir, exist_ok=True)
-                fsdp_safe_save(model, optimizer, epoch, step, checkpoint_dir=last_ckpt_dir, filename="final_checkpoint.pth")
-                save_config(tokenizer, last_ckpt_dir)
+            # ======= エポック末尾の保存（全rankで呼ぶ）======
+            torch.cuda.synchronize()
+            dist.barrier()
+            save_final_checkpoint(model, optimizer, epoch, step, CHECKPOINT_DIR, tokenizer)
+            dist.barrier()
+            torch.cuda.empty_cache()
 
         dist.barrier()
 
