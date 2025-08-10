@@ -32,10 +32,6 @@ def _fa2_is_installed() -> bool:
 
 
 def _fa2_supports_s_aux() -> bool:
-    """
-    Check whether local flash-attn exposes `flash_attn_varlen_func` that accepts
-    `s_aux` (or **kwargs), which HF integration may pass.
-    """
     try:
         from flash_attn.flash_attn_interface import flash_attn_varlen_func
     except Exception:
@@ -48,17 +44,12 @@ def _fa2_supports_s_aux() -> bool:
         params = sig.parameters
         if "s_aux" in params:
             return True
-        # Accepts **kwargs → compatible
         return any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
     except Exception:
         return False
 
 
 def _select_attn_impl(requested: str, strict: bool) -> str:
-    """
-    requested: 'auto' | 'sdpa' | 'flash2'
-    strict: True → when 'flash2' requested but incompatible, raise; otherwise fallback to SDPA.
-    """
     req = requested.lower()
     if req == "sdpa":
         return "sdpa"
@@ -72,13 +63,11 @@ def _select_attn_impl(requested: str, strict: bool) -> str:
             )
         print("⚠️ flash2 requested but flash-attn is incompatible. Falling back to SDPA.")
         return "sdpa"
-    # auto
     if _fa2_is_installed() and _fa2_supports_s_aux():
         return "flash_attention_2"
     return "sdpa"
 
 
-# ---------------- sdpa kernel ctx ----------------
 def _build_sdpa_ctx():
     try:
         from torch.nn.attention import sdpa_kernel as _new_sdpa_kernel, SDPBackend
@@ -94,7 +83,6 @@ def _build_sdpa_ctx():
             return torch.backends.cuda.sdp_kernel(
                 enable_flash=True, enable_mem_efficient=True, enable_math=True
             )
-
         return _ctx
 
 
@@ -144,9 +132,10 @@ def build_default_ds_config(micro_bs: int, grad_accum: int):
         "overlap_comm": True,
         "contiguous_gradients": True,
         "reduce_scatter": True,
-        "stage3_param_persistence_threshold": 1024,
+        "stage3_param_persistence_threshold": 0,
         "stage3_gather_16bit_weights_on_model_save": True,
-        # GPU only (no offload)
+        "allgather_partitions": True,
+        "use_multi_rank_bucket_allreduce": True,
         "offload_param": {"device": "none"},
         "offload_optimizer": {"device": "none"},
     }
@@ -156,6 +145,10 @@ def build_default_ds_config(micro_bs: int, grad_accum: int):
         "train_micro_batch_size_per_gpu": micro_bs,
         "gradient_accumulation_steps": grad_accum,
         "zero_optimization": zero3,
+        "activation_checkpointing": {
+            "partition_activations": True,
+            "cpu_checkpointing": False
+        },
         "wall_clock_breakdown": False,
     }
 
@@ -191,10 +184,6 @@ class CosineWarmup:
 
 # ---------------- helper: normalize ds_config ----------------
 def normalize_ds_config(ds_config: dict, use_bnb: bool):
-    """
-    - Move zero_allow_untested_optimizer to top level (DS 0.17+)
-    - If bitsandbytes is used, disable offload and set zero_allow_untested_optimizer=True
-    """
     z = ds_config.setdefault("zero_optimization", {})
     if "zero_allow_untested_optimizer" in z:
         val = bool(z.pop("zero_allow_untested_optimizer"))
@@ -244,13 +233,7 @@ def _rotate_ckpts(root: str, keep: int, rank: int):
 
 
 def _save_sharded(engine, tokenizer, tag: str, out_root: str, keep: int, min_free_gb: float):
-    """
-    Save ZeRO-3 sharded checkpoint on all ranks with disk-space guard
-    and rotation (rank0).
-    """
     rank = dist.get_rank()
-
-    # rank0 decides whether to skip by free space, and broadcasts
     skip = torch.tensor([0], device=engine.device)
     if rank == 0:
         free_gb = _get_free_gb(out_root)
@@ -263,48 +246,35 @@ def _save_sharded(engine, tokenizer, tag: str, out_root: str, keep: int, min_fre
     if int(skip.item()) == 0:
         out_dir = os.path.join(out_root, tag)
         os.makedirs(out_dir, exist_ok=True)
-        engine.save_checkpoint(out_dir, tag=tag)  # ZeRO-3 sharded
+        engine.save_checkpoint(out_dir, tag=tag)
         if rank == 0:
             save_config(tokenizer, out_dir)
     dist.barrier()
-
-    # Rotation by rank0
     _rotate_ckpts(out_root, keep=keep, rank=rank)
     dist.barrier()
 
 
 def _export_hf(engine, tokenizer, out_dir: str, tag: str, max_shard_gb: int = 10):
-    """
-    ZeRO-3 の重みを16bitに集約 → 新規CPUモデルにロードして HF 形式で保存。
-    consolidate は全ランクで実行、保存は rank0 のみ。
-    """
     t0 = time.time()
     try:
         os.makedirs(out_dir, exist_ok=True)
-
-        # 全ランクで集約（返り値は rank0 にだけ実体が入る実装）
         state_dict = engine._zero3_consolidated_16bit_state_dict()
-
         if dist.get_rank() == 0:
-            # 既存の partitioned module にはロードしない！新しいCPUモデルを作る
             from transformers import AutoModelForCausalLM
-            cfg = engine.module.config  # 訓練中モデルのHF Configを再利用
-            target = AutoModelForCausalLM.from_config(cfg)
+            cfg = engine.module.config
+            target = AutoModelForCausalLM.from_config(cfg, trust_remote_code=True)
             target.to("cpu")
-            missing, unexpected = target.load_state_dict(state_dict, strict=False)
-
+            target.load_state_dict(state_dict, strict=False)
             sub = os.path.join(out_dir, f"hf_{tag}")
             os.makedirs(sub, exist_ok=True)
             target.save_pretrained(sub, safe_serialization=True, max_shard_size=f"{max_shard_gb}GB")
             tokenizer.save_pretrained(sub)
-            dt = time.time() - t0
-            print(f"✅ HF snapshot saved at: {sub} ({dt:.1f}s)")
+            print(f"✅ HF snapshot saved at: {sub} ({time.time()-t0:.1f}s)")
     except Exception as e:
         if dist.get_rank() == 0:
             print(f"HF export failed: {e}")
     finally:
         dist.barrier()
-
 
 
 # ---------------- main ----------------
@@ -316,32 +286,24 @@ def main():
     p.add_argument("--wd", type=float, default=0.01)
     p.add_argument("--epoch", type=int, default=1)
     p.add_argument("--batch_size", type=int, default=1)
-    p.add_argument("--save", type=int, default=2000, help="save interval (steps)")
-    p.add_argument("--save_keep", type=int, default=2, help="how many latest ZeRO checkpoints to keep")
-    p.add_argument("--min_free_gb", type=float, default=150.0, help="skip save if free disk (GB) < this")
-    p.add_argument("--save_hf_on_fail", action="store_true", help="on ZeRO save failure, also export HF snapshot")
-    p.add_argument("--hf_only_save", action="store_true",
-                   help="Do NOT write ZeRO sharded checkpoints; export HF snapshot at the END only.")
-    p.add_argument("--export_dir", type=str, default="",
-                   help="If set, export HF snapshot at END of training (and for fallback). "
-                        "If empty, defaults to ./export_hf")
-    p.add_argument("--export_max_shard_gb", type=int, default=10,
-                   help="HF safe-serialization shard size in GB (e.g., 10)")
+    p.add_argument("--save", type=int, default=2000)
+    p.add_argument("--save_keep", type=int, default=2)
+    p.add_argument("--min_free_gb", type=float, default=150.0)
+    p.add_argument("--save_hf_on_fail", action="store_true")
+    p.add_argument("--hf_only_save", action="store_true")
+    p.add_argument("--export_dir", type=str, default="")
+    p.add_argument("--export_max_shard_gb", type=int, default=10)
     p.add_argument("--dataset_dir", type=str, default=PT_DIR)
-    p.add_argument("--resume", action="store_true")  # placeholder; not used when hf_only_save
+    p.add_argument("--resume", action="store_true")
     p.add_argument("--hf_model", type=str, required=True)
     p.add_argument("--max_len", type=int, default=896)
     p.add_argument("--accumulation_steps", type=int, default=1)
     p.add_argument("--log_interval", type=int, default=1)
     p.add_argument("--deepspeed_config", type=str, default="")
-    p.add_argument("--allow_cpu_offload", action="store_true",
-                   help="Allow CPU offload (slower). Default: force GPU only.")
-    p.add_argument("--attn_impl", type=str, default="auto", choices=["auto", "sdpa", "flash2"],
-                   help="Attention backend selector. 'auto' picks FA2 if compatible, else SDPA.")
-    p.add_argument("--attn_strict", action="store_true",
-                   help="With --attn_impl flash2, error if incompatible (otherwise fallback to SDPA).")
-    p.add_argument("--flush_interval", type=int, default=0,
-                   help=">0: call empty_cache() on all ranks every N steps to align allocator flushes.")
+    p.add_argument("--allow_cpu_offload", action="store_true")
+    p.add_argument("--attn_impl", type=str, default="auto", choices=["auto", "sdpa", "flash2"])
+    p.add_argument("--attn_strict", action="store_true")
+    p.add_argument("--flush_interval", type=int, default=0)
     p.add_argument("--local_rank", type=int, default=0)
     args = p.parse_args()
 
@@ -361,7 +323,7 @@ def main():
         pass
 
     # ---- tokenizer / dataset
-    tokenizer = AutoTokenizer.from_pretrained(args.hf_model, use_fast=False)
+    tokenizer = AutoTokenizer.from_pretrained(args.hf_model, use_fast=False, trust_remote_code=True)
     pt_files = sorted(glob(os.path.join(args.dataset_dir, "*.pt")))
     raw = []
     if dist.get_rank() == 0:
@@ -396,22 +358,6 @@ def main():
         collate_fn=collate,
     )
 
-    # ---- model & attention impl
-    choose_impl = _select_attn_impl(args.attn_impl, strict=args.attn_strict)
-    if dist.get_rank() == 0:
-        print(f"Attention impl: {choose_impl}  (requested={args.attn_impl}, strict={args.attn_strict})")
-        if choose_impl != "flash_attention_2" and args.attn_impl in ("auto", "flash2") and _fa2_is_installed():
-            print("⚠️ flash-attn は検出されましたが、Transformers と非互換のため SDPA にフォールバックしました。")
-
-    model = AutoModelForCausalLM.from_pretrained(
-        args.hf_model,
-        torch_dtype=torch.bfloat16,
-        attn_implementation=choose_impl,
-    )
-    model.config.use_cache = False
-    model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
-    model.train()
-
     # ---- DeepSpeed config
     use_bnb = args.optimizer in ("adamw8bit", "pagedadamw8bit")
     if args.deepspeed_config and os.path.isfile(args.deepspeed_config):
@@ -427,7 +373,6 @@ def main():
     ds_config = normalize_ds_config(ds_config, use_bnb=use_bnb)
     z = ds_config.setdefault("zero_optimization", {})
 
-    # Force GPU-only unless allowed
     if is_cpu_offload(z) and not args.allow_cpu_offload and dist.get_rank() == 0:
         print("⚠️ DeepSpeed: CPU Offload が有効です（遅い）。--allow_cpu_offload を付けない限り解除します。")
         z["offload_param"] = {"device": "none"}
@@ -436,6 +381,26 @@ def main():
     if dist.get_rank() == 0:
         print(f"[DeepSpeed] offload_param={(z.get('offload_param') or {}).get('device','none')}, "
               f"offload_optimizer={(z.get('offload_optimizer') or {}).get('device','none')}")
+
+    # ---- model & attention impl （★ partitioned initは使わない）
+    choose_impl = _select_attn_impl(args.attn_impl, strict=args.attn_strict)
+    if dist.get_rank() == 0:
+        print(f"Attention impl: {choose_impl}  (requested={args.attn_impl}, strict={args.attn_strict})")
+        if choose_impl != "flash_attention_2" and args.attn_impl in ("auto", "flash2") and _fa2_is_installed():
+            print("⚠️ flash-attn は検出されましたが、Transformers と非互換のため SDPA にフォールバックしました。")
+
+    # ここで CPU に実体化してから DeepSpeed.initialize へ
+    model = AutoModelForCausalLM.from_pretrained(
+        args.hf_model,
+        torch_dtype=torch.bfloat16,
+        attn_implementation=choose_impl,
+        low_cpu_mem_usage=True,
+        device_map={'': 'cpu'},
+        trust_remote_code=True,
+    )
+    model.config.use_cache = False
+    model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+    model.train()
 
     # ---- optimizer
     client_optimizer = None
@@ -481,10 +446,17 @@ def main():
     engine, _, _, _ = deepspeed.initialize(
         model=model,
         model_parameters=model.parameters(),
-        optimizer=client_optimizer,  # If DS built-in optimizer used, passing None is fine (configured above)
+        optimizer=client_optimizer,
         config=ds_config,
     )
     device = engine.device
+
+    if dist.get_rank() == 0:
+        try:
+            print(f"[diag] world={dist.get_world_size()} dp={engine.dp_world_size} "
+                  f"zero={engine.zero_optimization_stage}")
+        except Exception:
+            pass
 
     # ---- LR scheduler
     accum = max(1, args.accumulation_steps)
@@ -531,7 +503,7 @@ def main():
                 step_tokens = int(batch["attention_mask"].sum().item())
 
                 try:
-                    outputs = engine(**batch)  # autocast is handled by DS
+                    outputs = engine(**batch)
                     loss = outputs.loss / accum
                     if not torch.isfinite(loss):
                         local_bad = True
@@ -599,7 +571,6 @@ def main():
                     except Exception as e:
                         print(f"[Rank {local_rank}] ログ書き込み失敗: {e}")
 
-                # ----- checkpoint save (interval) -----
                 if (not args.hf_only_save) and args.save > 0 and (step + 1) % args.save == 0:
                     tag = f"epoch{epoch}_step{step}"
                     try:
@@ -614,11 +585,8 @@ def main():
                         if args.save_hf_on_fail:
                             fallback_dir = args.export_dir or os.path.join(DATA_PATH, "export_hf")
                             _export_hf(engine, tokenizer, fallback_dir, tag, max_shard_gb=args.export_max_shard_gb)
-            # for step
 
-        # for epoch
-
-        # ----- final save / export -----
+        # final save / export
         tag = f"final_epoch{args.epoch}_step{step_idx_global}"
 
         if not args.hf_only_save:
@@ -636,7 +604,6 @@ def main():
                     fallback_dir = args.export_dir or os.path.join(DATA_PATH, "export_hf")
                     _export_hf(engine, tokenizer, fallback_dir, tag, max_shard_gb=args.export_max_shard_gb)
 
-        # Always export HF if export_dir specified or hf_only_save is True
         if args.hf_only_save or args.export_dir:
             export_dir = args.export_dir or os.path.join(DATA_PATH, "export_hf")
             if dist.get_rank() == 0:
