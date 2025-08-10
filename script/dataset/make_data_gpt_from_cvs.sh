@@ -1,7 +1,7 @@
 cd ../../
 python make_dataset_cvs.py \
   --source_type csv \
-  --csv_path aizu_1000.csv \
+  --csv_path ./dataset/aizu_1000.csv \
   --question_field Question \
   --answer_field Answer \
   --output_dir tokenized_dataset \
