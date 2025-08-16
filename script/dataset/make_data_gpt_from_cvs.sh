@@ -1,5 +1,5 @@
 cd ../../
-python make_dataset.py \
+python ./make_dataset_gpt.py \
   --source_type csv \
   --csv_path ./dataset/aizu_1000.csv \
   --question_field Question \
