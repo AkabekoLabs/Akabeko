@@ -10,6 +10,8 @@ torchrunを使って分散GPUで、Qwen3ベースのモデルの事前学習や�
 
 ## 学習時間(gpt-oss-20b)
 
+- DeepSpeedに対応
+- H200ベースで検証中
 
 ## 学習時間(Qwen)
 
